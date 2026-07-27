@@ -5,8 +5,9 @@ export default function Home() {
     <main>
       <h1>Eco</h1>
       <p className="status">
-        Phase 1 — core voice loop. Tap the mic, speak, and Eco replies back
-        in voice. No tools yet.
+        Phase 5 — real-time orchestration. Tap the mic, speak, and Eco
+        replies back in voice — with web search, browser control, and
+        screen reading, all over a live LiveKit connection.
       </p>
       <VoiceAgent />
     </main>
