@@ -196,14 +196,24 @@ export default function VoiceAgent() {
       </div>
 
       <div className="controls">
-        <button
-          className={`mic-button ${micEnabled ? "recording" : ""}`}
-          onClick={() => void toggleMic()}
-          disabled={status === "connecting" || status === "thinking" || status === "speaking"}
-          aria-label={statusLabel[status]}
-        >
-          {micEnabled ? "■" : "●"}
-        </button>
+        <div className="mic-wrap" data-status={status}>
+          <div className="pulse-ring" />
+          <div className="pulse-ring ring-2" />
+          <div className="eq-bars">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+          <button
+            className={`mic-button ${micEnabled ? "recording" : ""}`}
+            onClick={() => void toggleMic()}
+            disabled={status === "connecting" || status === "thinking" || status === "speaking"}
+            aria-label={statusLabel[status]}
+          >
+            {micEnabled ? "■" : "●"}
+          </button>
+        </div>
         <div className="status">{statusLabel[status]}</div>
         <button
           className={`screen-share-button ${screenSharing ? "active" : ""}`}
