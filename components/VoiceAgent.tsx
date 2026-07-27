@@ -1,305 +1,178 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import type { ChatMessage, ContentPart } from "@/lib/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Room,
+  RoomEvent,
+  Track,
+  type RemoteParticipant,
+  type RemoteTrack,
+  type RemoteTrackPublication,
+} from "livekit-client";
+import type { ChatMessage } from "@/lib/types";
 
-type Status = "idle" | "recording" | "thinking" | "speaking" | "error";
+type Status =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  | "reconnecting"
+  | "error";
 
-function messageText(content: string | ContentPart[]): string {
-  if (typeof content === "string") return content;
-  return content
-    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
-    .map((p) => p.text)
-    .join(" ");
-}
+type TranscriptEvent = { role: "user" | "assistant"; text: string; final: boolean };
 
-function hasImage(content: string | ContentPart[]): boolean {
-  return typeof content !== "string" && content.some((p) => p.type === "image_url");
-}
+const AGENT_STATE_TO_STATUS: Record<string, Status> = {
+  listening: "listening",
+  thinking: "thinking",
+  speaking: "speaking",
+  initializing: "connecting",
+  idle: "idle",
+};
 
 export default function VoiceAgent() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [interimText, setInterimText] = useState("");
-  const [liveReply, setLiveReply] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [screenSharing, setScreenSharing] = useState(false);
+  const [micEnabled, setMicEnabled] = useState(false);
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const finalTranscriptRef = useRef("");
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const displayStreamRef = useRef<MediaStream | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const roomRef = useRef<Room | null>(null);
+  const audioContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const cleanupRecording = useCallback(() => {
-    mediaRecorderRef.current?.stop();
-    mediaRecorderRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    wsRef.current?.close();
-    wsRef.current = null;
+  const findAgent = useCallback((room: Room): RemoteParticipant | undefined => {
+    for (const p of room.remoteParticipants.values()) return p;
+    return undefined;
   }, []);
 
-  const stopScreenShare = useCallback(() => {
-    displayStreamRef.current?.getTracks().forEach((t) => t.stop());
-    displayStreamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-    setScreenSharing(false);
+  const applyAgentState = useCallback((participant: RemoteParticipant) => {
+    const state = participant.attributes["lk.agent.state"];
+    if (state && AGENT_STATE_TO_STATUS[state]) {
+      setStatus((prev) => (prev === "error" ? prev : AGENT_STATE_TO_STATUS[state]));
+    }
   }, []);
+
+  const connect = useCallback(async (): Promise<Room> => {
+    if (roomRef.current) return roomRef.current;
+
+    setError(null);
+    setStatus("connecting");
+
+    const res = await fetch("/api/livekit-token", { method: "POST" });
+    if (!res.ok) throw new Error("Could not get a connection token");
+    const { token, url } = await res.json();
+
+    const room = new Room();
+    roomRef.current = room;
+
+    room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+      if (track.kind === Track.Kind.Audio) {
+        const el = track.attach();
+        audioContainerRef.current?.appendChild(el);
+      }
+    });
+
+    room.on(
+      RoomEvent.TrackUnsubscribed,
+      (track: RemoteTrack, _pub: RemoteTrackPublication) => {
+        track.detach().forEach((el) => el.remove());
+      }
+    );
+
+    room.on(RoomEvent.ParticipantConnected, applyAgentState);
+    room.on(RoomEvent.ParticipantAttributesChanged, (_attrs, participant) => {
+      applyAgentState(participant as RemoteParticipant);
+    });
+
+    room.on(RoomEvent.Reconnecting, () => setStatus("reconnecting"));
+    room.on(RoomEvent.Reconnected, () => {
+      const agent = findAgent(room);
+      if (agent) applyAgentState(agent);
+      else setStatus("idle");
+    });
+    room.on(RoomEvent.Disconnected, () => {
+      roomRef.current = null;
+      setMicEnabled(false);
+      setStatus("idle");
+    });
+
+    room.registerTextStreamHandler("eco.transcript", async (reader) => {
+      const raw = await reader.readAll();
+      let event: TranscriptEvent;
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        return;
+      }
+
+      if (event.role === "user") {
+        if (event.final) {
+          setInterimText("");
+          setMessages((prev) => [...prev, { role: "user", content: event.text }]);
+          // Mirrors the old push-to-talk flow: one utterance per tap, then
+          // wait for the reply before the mic can be tapped on again.
+          void room.localParticipant.setMicrophoneEnabled(false);
+          setMicEnabled(false);
+        } else {
+          setInterimText(event.text);
+        }
+      } else if (event.final) {
+        setMessages((prev) => [...prev, { role: "assistant", content: event.text }]);
+      }
+    });
+
+    await room.connect(url, token);
+    const agent = findAgent(room);
+    if (agent) applyAgentState(agent);
+    else setStatus("idle");
+
+    return room;
+  }, [applyAgentState, findAgent]);
+
+  const toggleMic = useCallback(async () => {
+    try {
+      const room = await connect();
+      const next = !micEnabled;
+      await room.localParticipant.setMicrophoneEnabled(next);
+      setMicEnabled(next);
+      if (next) {
+        setInterimText("");
+        setStatus("listening");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not access the microphone");
+      setStatus("error");
+    }
+  }, [connect, micEnabled]);
 
   const toggleScreenShare = useCallback(async () => {
-    if (screenSharing) {
-      stopScreenShare();
-      return;
-    }
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
-      displayStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      // The browser's own "Stop sharing" control ends the track directly.
-      stream.getVideoTracks()[0].addEventListener("ended", stopScreenShare);
-      setScreenSharing(true);
+      const room = await connect();
+      const next = !screenSharing;
+      await room.localParticipant.setScreenShareEnabled(next);
+      setScreenSharing(next);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not start screen sharing"
       );
     }
-  }, [screenSharing, stopScreenShare]);
+  }, [connect, screenSharing]);
 
-  // Grabs the current frame from the shared screen as a compressed JPEG
-  // data URL, or null if screen sharing isn't active.
-  const captureScreenshot = useCallback((): string | null => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!screenSharing || !video || !canvas || !video.videoWidth) return null;
-
-    const maxWidth = 1280;
-    const scale = Math.min(1, maxWidth / video.videoWidth);
-    canvas.width = video.videoWidth * scale;
-    canvas.height = video.videoHeight * scale;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", 0.7);
-  }, [screenSharing]);
-
-  const startRecording = useCallback(async () => {
-    setError(null);
-    finalTranscriptRef.current = "";
-    setInterimText("");
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
-      streamRef.current = stream;
-
-      const tokenRes = await fetch("/api/stt-token", { method: "POST" });
-      if (!tokenRes.ok) throw new Error("Could not get a speech-to-text token");
-      const { access_token } = await tokenRes.json();
-
-      const ws = new WebSocket(
-        "wss://api.deepgram.com/v1/listen?smart_format=true&interim_results=true",
-        ["token", access_token]
-      );
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        const recorder = new MediaRecorder(stream, {
-          mimeType: "audio/webm;codecs=opus",
-        });
-        mediaRecorderRef.current = recorder;
-        recorder.ondataavailable = (e) => {
-          if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-            ws.send(e.data);
-          }
-        };
-        recorder.start(250);
-        setStatus("recording");
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const alt = data?.channel?.alternatives?.[0];
-          const transcript: string | undefined = alt?.transcript;
-          if (!transcript) return;
-
-          if (data.is_final) {
-            finalTranscriptRef.current =
-              `${finalTranscriptRef.current} ${transcript}`.trim();
-            setInterimText("");
-          } else {
-            setInterimText(transcript);
-          }
-        } catch {
-          // ignore malformed frames
-        }
-      };
-
-      ws.onerror = () => {
-        setError("Speech-to-text connection failed.");
-        setStatus("error");
-      };
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not start the microphone"
-      );
-      setStatus("error");
-      cleanupRecording();
-    }
-  }, [cleanupRecording]);
-
-  const speak = useCallback(async (text: string) => {
-    setStatus("speaking");
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error("Text-to-speech request failed");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (!audioRef.current) audioRef.current = new Audio();
-      audioRef.current.src = url;
-      audioRef.current.onended = () => {
-        URL.revokeObjectURL(url);
-        setStatus("idle");
-      };
-      await audioRef.current.play();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not play audio");
-      setStatus("error");
-    }
+  useEffect(() => {
+    return () => {
+      roomRef.current?.disconnect();
+      roomRef.current = null;
+    };
   }, []);
-
-  const sendToAgent = useCallback(
-    async (history: ChatMessage[]) => {
-      setStatus("thinking");
-      setLiveReply("");
-
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history }),
-        });
-        if (!res.ok || !res.body) throw new Error("The agent didn't respond");
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let assistantText = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice("data:".length).trim();
-            if (payload === "[DONE]") continue;
-            try {
-              const json = JSON.parse(payload);
-              const delta: string | undefined =
-                json?.choices?.[0]?.delta?.content;
-              if (delta) {
-                assistantText += delta;
-                setLiveReply(assistantText);
-              }
-            } catch {
-              // ignore partial/non-JSON keep-alive lines
-            }
-          }
-        }
-
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: assistantText },
-        ]);
-        setLiveReply("");
-
-        if (assistantText.trim()) {
-          await speak(assistantText);
-        } else {
-          setStatus("idle");
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Chat request failed");
-        setStatus("error");
-      }
-    },
-    [speak]
-  );
-
-  const stopRecording = useCallback(() => {
-    const recorder = mediaRecorderRef.current;
-    const ws = wsRef.current;
-
-    if (recorder && recorder.state !== "inactive") {
-      recorder.onstop = () => {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "CloseStream" }));
-        }
-        ws?.close();
-
-        const text = finalTranscriptRef.current.trim();
-        if (text) {
-          const screenshot = captureScreenshot();
-          const content: ChatMessage["content"] = screenshot
-            ? [
-                { type: "text", text },
-                { type: "image_url", image_url: { url: screenshot } },
-              ]
-            : text;
-
-          const updated: ChatMessage[] = [
-            ...messages,
-            { role: "user", content },
-          ];
-          setMessages(updated);
-          void sendToAgent(updated);
-        } else {
-          setStatus("idle");
-        }
-      };
-      recorder.stop();
-    } else {
-      cleanupRecording();
-      setStatus("idle");
-    }
-  }, [cleanupRecording, messages, sendToAgent, captureScreenshot]);
-
-  const toggleRecording = useCallback(() => {
-    if (status === "recording") {
-      stopRecording();
-    } else if (status === "idle" || status === "error") {
-      void startRecording();
-    }
-  }, [status, startRecording, stopRecording]);
 
   const statusLabel: Record<Status, string> = {
     idle: "Tap to talk",
-    recording: "Listening… tap to stop",
+    connecting: "Connecting…",
+    listening: "Listening… tap to stop",
     thinking: "Thinking…",
     speaking: "Speaking…",
+    reconnecting: "Reconnecting…",
     error: "Something went wrong — tap to retry",
   };
 
@@ -308,24 +181,20 @@ export default function VoiceAgent() {
       <div className="conversation">
         {messages.map((m, i) => (
           <div key={i} className={`bubble ${m.role}`}>
-            {hasImage(m.content) ? "📷 " : ""}
-            {messageText(m.content)}
+            {m.content}
           </div>
         ))}
-        {interimText && (
-          <div className="bubble user interim">{interimText}</div>
-        )}
-        {liveReply && <div className="bubble assistant">{liveReply}</div>}
+        {interimText && <div className="bubble user interim">{interimText}</div>}
       </div>
 
       <div className="controls">
         <button
-          className={`mic-button ${status === "recording" ? "recording" : ""}`}
-          onClick={toggleRecording}
-          disabled={status === "thinking" || status === "speaking"}
+          className={`mic-button ${micEnabled ? "recording" : ""}`}
+          onClick={() => void toggleMic()}
+          disabled={status === "connecting" || status === "thinking" || status === "speaking"}
           aria-label={statusLabel[status]}
         >
-          {status === "recording" ? "■" : "●"}
+          {micEnabled ? "■" : "●"}
         </button>
         <div className="status">{statusLabel[status]}</div>
         <button
@@ -337,9 +206,8 @@ export default function VoiceAgent() {
         {error && <div className="error">{error}</div>}
       </div>
 
-      {/* Hidden video/canvas used only to grab screenshot frames. */}
-      <video ref={videoRef} muted playsInline style={{ display: "none" }} />
-      <canvas ref={canvasRef} style={{ display: "none" }} />
+      {/* Hidden container for the agent's playable audio elements. */}
+      <div ref={audioContainerRef} style={{ display: "none" }} />
     </>
   );
 }
