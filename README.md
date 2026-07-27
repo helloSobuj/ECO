@@ -4,11 +4,10 @@ A personal voice assistant: talk to it, it talks back, it can search the
 web, control a browser, and read your screen. Cloud APIs only — nothing
 to self-host.
 
-Current status: **Phase 5 — real-time orchestration.** The whole voice
-loop now runs on LiveKit Agents instead of a custom REST/WebSocket
-pipeline: continuous VAD-based turn detection, session-scoped
-conversation memory, and push-to-talk gating, all over one live WebRTC
-connection.
+Current status: **Phase 6 — deployment.** The app is ready to run
+somewhere other than your own machine: a `Dockerfile` and `fly.toml`
+are included, and the deployment section below covers Railway, Fly,
+a plain VPS, and putting the web app on Vercel.
 
 ## Architecture
 
@@ -135,16 +134,81 @@ lib/
   tavily.ts                     web_search tool implementation (Tavily API)
   browser.ts                    browser_* tools (Steel.dev + Playwright/CDP),
                                 including the sensitive-action confirmation gate
+Dockerfile                      builds either process (web app or agent worker);
+                                which one runs is picked by the start command
+fly.toml                        Fly.io config — web + agent as process groups
 ```
 
-## Roadmap
+## Deployment
 
-- **Phase 6** — deploy somewhere the agent worker can run as a
-  persistent process (Railway, Fly, a VPS — not a cold-start serverless
-  platform like Vercel, since both the browser-session/confirmation
-  state in `lib/browser.ts` and the screen-frame state in `agent/screen.ts`
-  live in that process's memory), plus the Next.js app alongside it,
-  with keys kept server-side throughout.
+Two pieces, two different hosting needs:
 
-Later on, this Next.js app is a reasonable base to wrap in Electron (or
-similar) for a desktop build without a rewrite.
+- **The Next.js web app** is stateless — fine on serverless (Vercel).
+- **The agent worker must run as a persistent process.** `lib/browser.ts`
+  (browser session + pending confirmation) and `agent/screen.ts` (latest
+  screen frame) both hold state in server memory; a cold-start
+  serverless platform would silently lose that state between requests.
+  It needs Railway, Fly, or any VPS/box where the process just stays
+  running.
+
+### Env vars by service
+
+- **Web app** only ever needs `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` /
+  `LIVEKIT_URL` (to mint room-join tokens in `/api/livekit-token`).
+- **Agent worker** needs everything in `.env.example` — those three
+  LiveKit vars plus `DEEPGRAM_API_KEY`, `OPENROUTER_API_KEY`,
+  `OPENROUTER_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`,
+  `TAVILY_API_KEY`, `STEEL_API_KEY`.
+
+### Web app → Vercel
+
+Import this repo into Vercel (zero-config — it auto-detects Next.js),
+set the three `LIVEKIT_*` vars in the project settings, deploy. Don't
+add any of the tool/model keys there; the web app never touches them.
+
+### Agent worker → Railway
+
+Create **two** services from this same repo (one project, so they're
+easy to manage together):
+1. Web service — build command `npm run build`, start command
+   `npm run start`.
+2. Worker service — start command `npm run agent:start`.
+
+Set the full env var list on the worker service; the web service only
+needs the `LIVEKIT_*` ones (skip this one if you're deploying the web
+app to Vercel instead).
+
+### Agent worker → Fly.io
+
+`fly.toml` already defines both as process groups (`web` and `agent`)
+built from the included `Dockerfile`:
+
+```
+fly launch   # review the generated app name/region; keep the existing fly.toml
+fly secrets set LIVEKIT_API_KEY=... LIVEKIT_API_SECRET=... LIVEKIT_URL=... \
+  DEEPGRAM_API_KEY=... OPENROUTER_API_KEY=... ELEVENLABS_API_KEY=... \
+  ELEVENLABS_VOICE_ID=... TAVILY_API_KEY=... STEEL_API_KEY=...
+fly deploy
+```
+
+Only `web` gets a public HTTP service; `agent` doesn't need one — it
+only makes outbound connections to LiveKit and the tool APIs.
+
+### Agent worker → a VPS you already run
+
+```
+docker build -t eco-voice-agent .
+docker run -d --name eco-web   --env-file .env.local -p 3000:3000 eco-voice-agent
+docker run -d --name eco-agent --env-file .env.local eco-voice-agent npm run agent:start
+```
+
+Or without Docker: `npm ci && npm run build`, then run `npm run start`
+and `npm run agent:start` as two services under systemd or pm2 so they
+restart on a crash or reboot.
+
+## What's next
+
+The plan's six phases are all built. From here it's really about using
+it — and, per the plan, wrapping this Next.js app in Electron (or
+similar) for a desktop build is a reasonable next step without a
+rewrite, whenever that's wanted.

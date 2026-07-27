@@ -1,0 +1,37 @@
+# Starting point for `fly launch` / `fly deploy` — deploys both the
+# Next.js web app and the LiveKit agent worker as separate process
+# groups from the same image (see Dockerfile). Fly fills in `app` and
+# adjusts region/VM sizing on first `fly launch`; treat this as a
+# baseline to review, not a guaranteed-final config.
+#
+# Set secrets before deploying:
+#   fly secrets set LIVEKIT_API_KEY=... LIVEKIT_API_SECRET=... LIVEKIT_URL=... \
+#     DEEPGRAM_API_KEY=... OPENROUTER_API_KEY=... ELEVENLABS_API_KEY=... \
+#     ELEVENLABS_VOICE_ID=... TAVILY_API_KEY=... STEEL_API_KEY=...
+
+app = "eco-voice-agent"
+primary_region = "iad"
+
+[build]
+
+[processes]
+web = "npm run start"
+agent = "npm run agent:start"
+
+[http_service]
+processes = ["web"]
+internal_port = 3000
+force_https = true
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+
+[[vm]]
+processes = ["web"]
+size = "shared-cpu-1x"
+memory = "512mb"
+
+[[vm]]
+processes = ["agent"]
+size = "shared-cpu-1x"
+memory = "1gb"
