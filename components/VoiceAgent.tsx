@@ -134,7 +134,15 @@ export default function VoiceAgent() {
     try {
       const room = await connect();
       const next = !micEnabled;
-      await room.localParticipant.setMicrophoneEnabled(next);
+      // Explicit acoustic echo cancellation: without it, Eco's own voice
+      // coming out of your speakers gets picked back up by the mic and
+      // re-transcribed, which can spiral into an endless feedback loop.
+      // Headphones are still the most reliable fix in a noisy/echoey room.
+      await room.localParticipant.setMicrophoneEnabled(next, {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
       setMicEnabled(next);
       if (next) {
         setInterimText("");
