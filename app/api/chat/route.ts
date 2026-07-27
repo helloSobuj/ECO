@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { ChatMessage, LlmMessage } from "@/lib/types";
+import type { ChatMessage, ContentPart, LlmMessage } from "@/lib/types";
 import { tools, toolSchemas } from "@/lib/tools";
+
+function contentToText(content: string | ContentPart[] | null | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join(" ");
+}
 
 const SYSTEM_PROMPT =
   "You are Eco, a helpful personal voice assistant. Keep replies short, " +
@@ -15,7 +24,10 @@ const SYSTEM_PROMPT =
   "When a tool tells you an action needs confirmation, stop and ask the " +
   "user out loud in your reply — do not call browser_confirm until a " +
   "later turn where the user has actually answered, and never assume or " +
-  "fabricate their answer.";
+  "fabricate their answer. When a user message includes an image, it's a " +
+  "live screenshot of their screen (sent because they're screen-sharing) " +
+  "— look at it and describe specifically what you see rather than " +
+  "guessing, if it's relevant to what they asked.";
 
 const MAX_TOOL_ROUNDS = 5;
 
@@ -106,7 +118,7 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      finalText = message.content ?? "";
+      finalText = contentToText(message.content);
       break;
     }
   } catch (err) {

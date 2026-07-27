@@ -108,3 +108,18 @@ h1 {
   font-size: 0.85rem;
   text-align: center;
 }
+
+.screen-share-button {
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--muted);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.screen-share-button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}

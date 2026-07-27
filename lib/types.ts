@@ -1,8 +1,15 @@
 export type ChatRole = "user" | "assistant";
 
+// A user message's content is normally just spoken text, but while screen
+// sharing is active a data-URL screenshot rides along as an extra part
+// (OpenAI-compatible multimodal content) so the model can see the screen.
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface ChatMessage {
   role: ChatRole;
-  content: string;
+  content: string | ContentPart[];
 }
 
 // Internal, server-side message shape used while talking to OpenRouter,
@@ -16,7 +23,7 @@ export interface ToolCall {
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content?: string | null;
+  content?: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }

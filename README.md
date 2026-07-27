@@ -4,19 +4,19 @@ A personal voice assistant: talk to it, it talks back, and (in later
 phases) it can search the web, control a browser, and read your screen.
 Cloud APIs only — nothing to self-host.
 
-Current status: **Phase 3 — browser control.** Mic → streaming
+Current status: **Phase 4 — screen reading.** Mic → streaming
 speech-to-text (Deepgram) → LLM reply (Claude via OpenRouter, now able to
-search the web and drive a real browser) → text-to-speech (ElevenLabs) →
-playback.
+search the web, drive a real browser, and see your screen) →
+text-to-speech (ElevenLabs) → playback.
 
 ## Architecture
 
 ```
-Browser (mic + speaker)
+Browser (mic + speaker + optional screen share)
   → Deepgram streaming STT   (via a short-lived token minted by the server)
-  → /api/chat  → OpenRouter (Claude) ⇄ web_search tool  → Tavily     [server-side keys]
-                                      ⇄ browser_* tools → Steel.dev
-  → /api/tts   → ElevenLabs                                          [server-side key]
+  → /api/chat  → OpenRouter (Claude, vision) ⇄ web_search tool  → Tavily     [server-side keys]
+                                             ⇄ browser_* tools → Steel.dev
+  → /api/tts   → ElevenLabs                                                  [server-side key]
 ```
 
 All API keys live only in server-side route handlers
@@ -51,6 +51,18 @@ while the Node process stays warm — fine on a persistent host (Railway,
 Fly, a VPS), but **not** on a cold-start serverless platform like Vercel.
 If Phase 6 deploys there, this needs a real store (e.g. Redis) instead.
 
+### Screen reading
+
+Vision reuses the same Claude/OpenRouter key — nothing new to configure.
+Click "Share screen" in the UI to grant browser screen-sharing access
+(`getDisplayMedia`, requires HTTPS or localhost). While it's active, each
+spoken turn captures the current frame client-side, downscales it to a
+compressed JPEG, and attaches it to that turn's message as an image —
+Claude sees it directly, no server-side screenshot tool involved, since
+only the browser has access to the user's screen. Sharing is entirely
+opt-in and stops the moment you click the button again (or use the
+browser's own "Stop sharing" control).
+
 ## Setup
 
 1. Install dependencies:
@@ -74,7 +86,7 @@ If Phase 6 deploys there, this needs a real store (e.g. Redis) instead.
    npm run dev
    ```
 4. Open http://localhost:3000, allow microphone access, tap the mic
-   button, and talk.
+   button, and talk. Click "Share screen" if you want Eco to see it.
 
 ## Project layout
 
@@ -100,7 +112,6 @@ lib/
 See the phases below — each is a separate round of work on top of this
 skeleton, without rewriting the core loop:
 
-- **Phase 4** — screen reading via Claude's vision input
 - **Phase 5** — move orchestration to LiveKit Agents, add voice activity
   detection, conversation memory, and a wake word / push-to-talk trigger
 - **Phase 6** — deploy the client (e.g. Vercel) with keys kept server-side
